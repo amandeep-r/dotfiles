@@ -1,43 +1,46 @@
-# Kindle Article Sync Tool
+# Kindle Article Sync
 
-Automatically sync markdown articles from your Obsidian vault to your Kindle e-reader via Calibre.
+Syncs flagged markdown articles from an Obsidian inbox to a Kindle for reading in KOReader.
 
-## How It Works
+## Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│  Obsidian Vault                                                 │
-│  └── Reading/ToReader/*.md                                      │
-│                                                                 │
-└────────────────┬────────────────────────────────────────────────┘
-                 │
-                 │ (1) Sync on Kindle plug-in
-                 ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│  Calibre Library                                                │
-│  └── Books tagged "Articles"                                    │
-│      • Adds new .md files                                       │
-│      • Removes deleted files                                    │
-│                                                                 │
-└────────────────┬────────────────────────────────────────────────┘
-                 │
-                 │ (2) Convert & send using template
-                 ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                                                                 │
-│  Kindle E-Reader                                                │
-│  └── documents/Articles/*.epub                                  │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+Obsidian vault (reading inbox)
+  └── article.md  ← send_to_kindle: true, kindle_sent: (unset)
+          │
+          │  USB plug-in triggers udev → systemd → sync script
+          ▼
+Kindle /documents/Articles/article.md  ← frontmatter stripped
+          │
+          └── source note marked kindle_sent: true (atomic write)
 ```
+
+No epub conversion. KOReader renders `.md` natively. Remote images in articles won't load (URLs aren't fetched/embedded).
+
+Note that Koreader will not enable mass usb storage mode on kindle devices. You must exit Koreader.
 
 ## Setup
 
-### 1. Install the Tool
+### 1. Configure paths
 
-Run the install script to set up automatic sync when you plug in your Kindle:
+Edit `config`:
+
+```bash
+VAULT_INBOX="$HOME/Documents/ObsidianVault/Reading/Inbox"  # folder containing clipped articles
+READER_MOUNT="/media/$USER/Kindle"                          # where Ubuntu auto-mounts the Kindle
+USB_VENDOR="1949"                                            # Kindle USB vendor ID
+USB_PRODUCT="0004"                                           # Kindle USB product ID
+```
+
+To find your Kindle's USB IDs:
+
+```bash
+lsusb | grep -i kindle
+# example: Bus 001 Device 005: ID 1949:0004 Amazon.com, Inc. Kindle
+#                                  ^^^^ ^^^^
+```
+
+### 2. Install the trigger
 
 ```bash
 cd ~/.dotfiles/reader-articles-sync
@@ -45,132 +48,72 @@ sudo ./install.sh
 ```
 
 This creates:
-- A udev rule that detects when your Kindle is plugged in
-- A systemd service that launches the sync script in a terminal window
+- `/etc/udev/rules.d/99-kindle-sync.rules` — fires on Kindle USB plug-in
+- `/etc/systemd/system/kindle-sync@.service` — launches a terminal running the sync script
 
-### 2. Configure Calibre Template (IMPORTANT!)
+### 3. Set up your Obsidian notes
 
-To ensure articles are saved in the `Articles/` folder on your Kindle, you **must** configure Calibre's save template for your device:
+Articles need these frontmatter properties:
 
-#### Steps:
-
-1. **Connect your Kindle** to your computer via USB
-2. Wait for Calibre to detect it (you'll see the device icon in the toolbar)
-3. Click the **device dropdown** in the toolbar and select **"Configure this device"**
-4. In the device configuration window, find the **Save template for this device** section and set:
-
-   ```
-   {:'str_in_list($tags, ",", "article", "Articles/", "")'}{title}
-   ```
-
-   **What this does:**
-   - If a book has a tag containing "article" (case-insensitive), prefix the path with `Articles/`
-   - Otherwise, save it to the root directory
-   - The final path becomes either `Articles/{title}` or just `{title}`
-
-5. Click **Apply** and **OK**
-
-> **Note:** This template uses the `str_in_list()` function to check if "article" appears anywhere in the tags list, making it case-insensitive and flexible.
-
-### 3. Configure Your Paths
-
-Edit the `config` file to match your setup:
-
-```bash
-nano config
+```yaml
+---
+send_to_kindle: true    # checkbox — set this to queue the article
+kindle_sent: false      # managed by the script; leave unset or false
+---
 ```
 
-```bash
-WATCH_DIR="$HOME/Documents/ObsidianVault/Reading/ToReader"  # Your Obsidian folder
-TAG="Articles"                                               # Calibre tag
-READER_MOUNT="/media/$USER/Kindle"                          # Where Kindle mounts
-USB_VENDOR="1949"                                            # Kindle USB vendor ID
-USB_PRODUCT="0004"                                           # Kindle USB product ID
-```
+The Obsidian Web Clipper template should include `send_to_kindle: false` by default so you can flip it per-article during triage.
 
 ## Usage
 
-### Automatic Sync (Recommended)
+1. Triage articles in Obsidian: set `send_to_kindle: true` on notes you want to read
+2. Plug in the Kindle via USB
+3. A terminal window opens showing sync progress
+4. Eject the Kindle
+5. In KOReader, browse to `Documents → Articles`
 
-1. Plug in your Kindle
-2. A terminal window will pop up showing the sync progress
-3. Wait for sync to complete
-4. Safely eject your Kindle
-5. Your articles will be in the `Articles` folder on your Kindle
+Articles are only sent once. After transfer the source note gets `kindle_sent: true` so replug-ins skip it.
 
-### Manual Sync
-
-You can also run the sync manually:
+## Manual sync
 
 ```bash
 cd ~/.dotfiles/reader-articles-sync
 ./sync-articles.sh
 ```
 
-## What the Tool Does
-
-1. **Waits** 5 seconds for your e-reader to be detected
-2. **Scans** your Obsidian folder for markdown files
-3. **Fetches** existing books from Calibre with the "Articles" tag
-4. **Adds** new markdown files to Calibre
-5. **Removes** books from Calibre if their source files were deleted
-6. **Prepares** the e-reader Articles folder (clears it for fresh sync)
-
-> **Note:** The tool only manages the Calibre library. You still need to use Calibre's "Send to device" feature to actually transfer books to your Kindle. The template ensures they go to the right folder.
-
-## Files
-
-- `config` - Configuration file
-- `sync-articles.sh` - Main sync script
-- `launch-sync.sh` - Wrapper that launches terminal
-- `install.sh` - Install udev rule and systemd service
-- `/etc/udev/rules.d/99-kindle-sync.rules` - Auto-trigger rule
-- `/etc/systemd/system/kindle-sync@.service` - Systemd service
-
 ## Troubleshooting
 
-### Terminal doesn't pop up
-
-Check the systemd service logs:
+**Terminal doesn't appear on plug-in**
 
 ```bash
 journalctl -u "kindle-sync@*" -n 50
 ```
 
-### Kindle not detected
+**Kindle not detected**
 
-Verify your Kindle's USB IDs:
-
+Verify the Kindle is mounted:
 ```bash
-lsusb | grep -i kindle
+ls /media/$USER/
 ```
 
-Update `USB_VENDOR` and `USB_PRODUCT` in the `config` file if needed.
+Check that USB IDs in `config` match `lsusb` output.
 
-### Articles not in Articles folder
+**Article shows up with raw YAML at the top**
 
-Make sure you configured the Calibre template as described in **Setup Step 2**.
+The script strips the frontmatter block before copying. If you see `---` text, the file may not have a well-formed frontmatter block (opening `---`, content, closing `---` on its own line).
 
-### Permission errors
-
-The install script needs sudo access to create udev rules and systemd services.
-
-## Uninstalling
-
-To remove the automatic sync, run the uninstall script:
+## Uninstall
 
 ```bash
-cd ~/.dotfiles/reader-articles-sync
 sudo ./uninstall.sh
 ```
 
-This will remove:
-- The udev rule (`/etc/udev/rules.d/99-kindle-sync.rules`)
-- The systemd service (`/etc/systemd/system/kindle-sync@.service`)
-- Reload system configuration
+## Files
 
-The script files will remain in your dotfiles for manual use if needed.
-
-## Credits
-
-Location: `~/.dotfiles/reader-articles-sync`
+| File | Purpose |
+|------|---------|
+| `config` | Paths and USB IDs |
+| `sync-articles.sh` | Main sync script |
+| `launch-sync.sh` | Opens terminal window for the script |
+| `install.sh` | Installs udev rule + systemd service |
+| `uninstall.sh` | Removes udev rule + systemd service |

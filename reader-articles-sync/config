@@ -1,5 +1,5 @@
-WATCH_DIR="$HOME/Documents/ObsidianVault/Reading/ToReader"
-TAG="Articles"
+VAULT_INBOX="$HOME/Documents/ObsidianVault/Clippings"
 READER_MOUNT="/media/$USER/Kindle"
+ARTICLES_DEST="Literature/Articles"
 USB_VENDOR="1949"
 USB_PRODUCT="0004"

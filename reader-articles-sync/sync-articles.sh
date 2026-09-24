@@ -3,84 +3,95 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/config"
 
-READER_ARTICLES="$READER_MOUNT/documents/Articles"
+KINDLE_ARTICLES="$READER_MOUNT/$ARTICLES_DEST"
 
 echo "======================================"
-echo "  Kindle Article Sync Tool"
+echo "  Kindle Article Sync"
 echo "======================================"
 echo ""
-echo "This tool syncs markdown articles from your Obsidian vault to your Kindle."
-echo ""
-echo "What it does:"
-echo "  1. Scans: $WATCH_DIR"
-echo "  2. Syncs with Calibre library (tag: '$TAG')"
-echo "  3. Prepares articles for your e-reader"
-echo ""
-echo "Configuration: $SCRIPT_DIR/config"
-echo "======================================"
-echo ""
-echo "Waiting 5 seconds for e-reader to be detected..."
-sleep 5
 
-echo "Checking if e-reader is mounted at $READER_MOUNT..."
+echo "Waiting for Kindle at $READER_MOUNT..."
+for i in $(seq 1 15); do
+    [ -d "$READER_MOUNT" ] && break
+    sleep 1
+done
+
 if [ ! -d "$READER_MOUNT" ]; then
-    echo "ERROR: E Reader not mounted at $READER_MOUNT"
+    echo "ERROR: Kindle not found at $READER_MOUNT"
     exit 1
 fi
-echo "E-reader detected successfully"
-
+echo "Kindle mounted."
 echo ""
-echo "Scanning for markdown files in $WATCH_DIR..."
-declare -A folder_files
-for file in "$WATCH_DIR"/*.md; do
-    [ -f "$file" ] || continue
-    name=$(basename "$file" .md)
-    folder_files["$name"]=1
-done
-echo "Found ${#folder_files[@]} markdown file(s)"
-
+echo "Scanning $VAULT_INBOX for flagged articles..."
 echo ""
-echo "Fetching books from Calibre with tag '$TAG'..."
-declare -A calibre_books
-while IFS=$'\t' read -r id title; do
-    calibre_books["$title"]="$id"
-done < <(calibredb list --search "tags:$TAG" --fields "id,title" --for-machine | jq -r '.[] | [.id, .title] | @tsv')
-echo "Found ${#calibre_books[@]} book(s) in Calibre with tag '$TAG'"
 
-echo ""
-echo "Syncing new files to Calibre..."
-added_count=0
-for name in "${!folder_files[@]}"; do
-    if [[ -z "${calibre_books[$name]}" ]]; then
-        echo "  Adding: $name"
-        calibredb add "$WATCH_DIR/$name.md" --tags "$TAG"
-        ((added_count++))
+mkdir -p "$KINDLE_ARTICLES"
+
+sent=0
+removed=0
+failed=0
+
+while IFS= read -r -d '' file; do
+    grep -qm1 '^send_to_reader: true' "$file" || continue
+    grep -qm1 '^sent_to_reader: true' "$file" && continue
+
+    filename=$(basename "$file")
+    dest="$KINDLE_ARTICLES/$filename"
+
+    awk '
+      /^---[[:space:]]*$/ && NR==1 { in_fm=1; next }
+      /^---[[:space:]]*$/ && in_fm  { in_fm=0; next }
+      !in_fm { print }
+    ' "$file" > "$dest"
+
+    if [ $? -ne 0 ]; then
+        echo "  FAILED (copy): $filename"
+        rm -f "$dest"
+        ((failed++))
+        continue
     fi
-done
-if [ $added_count -eq 0 ]; then
-    echo "  No new files to add"
-fi
 
-echo ""
-echo "Removing deleted files from Calibre..."
-removed_count=0
-for title in "${!calibre_books[@]}"; do
-    if [[ -z "${folder_files[$title]+x}" ]]; then
-        echo "  Removing: $title"
-        calibredb remove "${calibre_books[$title]}"
-        ((removed_count++))
+    tmp="${file}.synctmp"
+    awk '
+      BEGIN { in_fm=0; done=0 }
+      /^---[[:space:]]*$/ && NR==1 { in_fm=1; print; next }
+      /^---[[:space:]]*$/ && in_fm  { in_fm=0; if (!done) print "sent_to_reader: true"; print; next }
+      in_fm && /^sent_to_reader:/      { print "sent_to_reader: true"; done=1; next }
+      { print }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+
+    if [ $? -ne 0 ]; then
+        echo "  FAILED (mark): $filename"
+        rm -f "$tmp" "$dest"
+        ((failed++))
+        continue
     fi
-done
-if [ $removed_count -eq 0 ]; then
-    echo "  No files to remove"
-fi
+
+    echo "  Sent: $filename"
+    ((sent++))
+
+done < <(find "$VAULT_INBOX" -name "*.md" -print0)
 
 echo ""
-echo "Preparing e-reader Articles folder..."
-echo "  Clearing: $READER_ARTICLES"
-rm -rf "$READER_ARTICLES"
-mkdir -p "$READER_ARTICLES"
-echo "  Folder ready"
+echo "Checking for articles to remove..."
+echo ""
+
+while IFS= read -r -d '' kindle_file; do
+    filename=$(basename "$kindle_file")
+    vault_file="$VAULT_INBOX/$filename"
+
+    grep -qm1 '^send_to_reader: true' "$vault_file" 2>/dev/null && continue
+
+    rm -f "$kindle_file"
+    echo "  Removed: $filename"
+    ((removed++))
+
+    if [ -f "$vault_file" ]; then
+        tmp="${vault_file}.synctmp"
+        sed 's/^sent_to_reader:[[:space:]]*true[[:space:]]*$/sent_to_reader: false/' "$vault_file" > "$tmp" && mv "$tmp" "$vault_file"
+    fi
+
+done < <(find "$KINDLE_ARTICLES" -name "*.md" -print0)
 
 echo ""
-echo "Sync complete!"
+echo "Done. Sent: $sent, Removed: $removed, Failed: $failed"
